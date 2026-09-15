@@ -4,6 +4,7 @@ use zellij_utils::{
     position::Position,
 };
 
+use crate::panes::kitty_graphics::KittyHostSupport;
 use crate::resize_pty;
 use crate::tab::{pane_info_for_pane, Pane};
 use floating_pane_grid::FloatingPaneGrid;
@@ -165,6 +166,17 @@ impl FloatingPanes {
     pub fn pane_ids(&self) -> impl Iterator<Item = &PaneId> {
         self.panes.keys()
     }
+    pub fn rendered_pane_ids(&self) -> Vec<PaneId> {
+        if self.panes_are_visible() {
+            self.panes.keys().copied().collect()
+        } else {
+            self.panes
+                .iter()
+                .filter(|(_, pane)| pane.position_and_size().is_pinned)
+                .map(|(pane_id, _)| *pane_id)
+                .collect()
+        }
+    }
     pub fn add_pane(&mut self, pane_id: PaneId, pane: Box<dyn Pane>) {
         self.desired_pane_positions
             .insert(pane_id, pane.position_and_size());
@@ -200,9 +212,17 @@ impl FloatingPanes {
             .and_then(|removed_pane| {
                 let removed_pane_id = removed_pane.pid();
                 let with_pane_id = with_pane.pid();
-                let removed_pane_geom = removed_pane.current_geom();
+                let removed_pane_geom = removed_pane.position_and_size();
+                let removed_pane_geom_override = removed_pane.geom_override();
                 with_pane.set_geom(removed_pane_geom);
+                match removed_pane_geom_override {
+                    Some(geom_override) => with_pane.set_geom_override(geom_override),
+                    None => with_pane.reset_size_and_position_override(),
+                };
                 self.panes.insert(with_pane_id, with_pane);
+                if self.fullscreen_pane_id == Some(pane_id) {
+                    self.fullscreen_pane_id = Some(with_pane_id);
+                }
                 let z_index = self
                     .z_indices
                     .iter()
@@ -261,6 +281,9 @@ impl FloatingPanes {
     pub fn panes_are_visible(&self) -> bool {
         self.show_panes && !*self.fullscreen_covers_ui.borrow()
     }
+    pub fn panes_are_shown(&self) -> bool {
+        self.show_panes
+    }
     pub fn has_active_panes(&self) -> bool {
         !self.active_panes.is_empty()
     }
@@ -295,21 +318,6 @@ impl FloatingPanes {
     }
     pub fn panes_contain(&self, pane_id: &PaneId) -> bool {
         self.panes.contains_key(pane_id)
-    }
-    pub fn set_shadow_focus(&mut self, client_id: ClientId, pane_id: PaneId) {
-        self.active_panes.insert_silent(client_id, pane_id);
-    }
-    pub fn clear_shadow_focus(&mut self, client_id: ClientId) -> Option<PaneId> {
-        self.active_panes.remove_silent(&client_id)
-    }
-    pub fn is_shadow_focus_client(&self, client_id: &ClientId) -> bool {
-        self.active_panes.is_shadow_client(client_id)
-    }
-    pub fn shadow_focus_clients(&self) -> Vec<ClientId> {
-        self.active_panes.iter_shadow_clients().copied().collect()
-    }
-    pub fn has_shadow_focus_on(&self, client_id: ClientId, pane_id: PaneId) -> bool {
-        self.active_panes.has_shadow_focus_on(client_id, pane_id)
     }
     pub fn find_room_for_new_pane(&mut self) -> Option<PaneGeom> {
         let display_area = *self.display_area.borrow();
@@ -473,6 +481,7 @@ impl FloatingPanes {
         client_id_override: Option<ClientId>,
         help_text_visible: &HashMap<ClientId, bool>,
         mouse_scroll_resize: bool,
+        mouse_hover_tips: bool,
     ) -> Result<()> {
         let err_context = || "failed to render output";
         let mut connected_clients: HashSet<ClientId> =
@@ -559,11 +568,7 @@ impl FloatingPanes {
             let mut active_panes = active_panes.clone();
             let multiple_users_exist_in_session =
                 { self.connected_clients_in_app.borrow().len() > 1 };
-            let connected = self.connected_clients.borrow();
-            active_panes.retain(|c_id, _| {
-                connected.contains(c_id) || self.active_panes.is_shadow_client(c_id)
-            });
-            drop(connected);
+            active_panes.retain(|c_id, _| self.connected_clients.borrow().contains(c_id));
             let pane_is_selectable = pane.selectable();
             let show_help_text = active_panes.iter().any(|(client_id, pane_id)| {
                 pane_id == &pane.pid() && help_text_visible.get(client_id).copied().unwrap_or(false)
@@ -591,6 +596,7 @@ impl FloatingPanes {
                 show_help_text,
                 false,
                 mouse_scroll_resize,
+                mouse_hover_tips,
                 self.dimmed_clients.clone(),
             );
             for client_id in &connected_clients {
@@ -1159,14 +1165,8 @@ impl FloatingPanes {
             .nth(1)
             .map(|(pane_id, _pane)| **pane_id);
 
-        let connected_clients: HashSet<ClientId> =
-            self.connected_clients.borrow().iter().copied().collect();
         for (client_id, active_pane_id) in active_panes {
             if active_pane_id == pane_id {
-                if !connected_clients.contains(&client_id) {
-                    self.active_panes.remove_silent(&client_id);
-                    continue;
-                }
                 match next_active_pane_id {
                     Some(next_active_pane_id) => {
                         self.active_panes
@@ -1291,7 +1291,11 @@ impl FloatingPanes {
     }
     pub fn toggle_pane_fullscreen(&mut self, pane_id: PaneId) {
         if self.fullscreen_pane_id.is_some() {
+            let was_no_ui = self.floating_fullscreen_covers_ui;
             self.unset_fullscreen();
+            if was_no_ui {
+                self.set_fullscreen(pane_id, false);
+            }
         } else {
             self.set_fullscreen(pane_id, false);
         }
@@ -1585,17 +1589,10 @@ impl FloatingPanes {
             .filter(|(_cid, pid)| **pid == from_pane_id)
             .map(|(cid, _pid)| *cid)
             .collect();
-        let connected_clients: HashSet<ClientId> =
-            self.connected_clients.borrow().iter().copied().collect();
         for client_id in clients_in_pane {
-            if connected_clients.contains(&client_id) {
-                self.active_panes.remove(&client_id, &mut self.panes);
-                self.active_panes
-                    .insert(client_id, to_pane_id, &mut self.panes);
-            } else {
-                self.active_panes.remove_silent(&client_id);
-                self.active_panes.insert_silent(client_id, to_pane_id);
-            }
+            self.active_panes.remove(&client_id, &mut self.panes);
+            self.active_panes
+                .insert(client_id, to_pane_id, &mut self.panes);
         }
     }
     pub fn reapply_pane_focus(&mut self) {
@@ -1695,6 +1692,16 @@ impl FloatingPanes {
     pub fn update_pane_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         for pane in self.panes.values_mut() {
             pane.update_arrow_fonts(should_support_arrow_fonts);
+        }
+    }
+    pub fn update_pane_kitty_host_support(&mut self, supported: KittyHostSupport) {
+        for pane in self.panes.values_mut() {
+            pane.update_kitty_host_support(supported);
+        }
+    }
+    pub fn update_pane_sixel_host_support(&mut self, supported: bool) {
+        for pane in self.panes.values_mut() {
+            pane.update_sixel_host_support(supported);
         }
     }
     pub fn update_pane_rounded_corners(&mut self, rounded_corners: bool) {

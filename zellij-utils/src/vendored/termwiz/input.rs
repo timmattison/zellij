@@ -152,6 +152,8 @@ pub enum InputEvent {
         final_byte: u8,
         raw: Vec<u8>,
     },
+    FocusGained,
+    FocusLost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1553,6 +1555,9 @@ impl InputParser {
                 modifiers: Modifiers::NONE,
             }),
         );
+        map.insert(b"\x1b[I", InputEvent::FocusGained);
+        map.insert(b"\x1b[O", InputEvent::FocusLost);
+
         map.insert(
             b"\x1b[",
             InputEvent::Key(KeyEvent {
@@ -1891,6 +1896,14 @@ impl InputParser {
         );
     }
 
+    /// Number of bytes still held unprocessed in the parser's internal
+    /// buffer. A caller that mirrors this ring separately (e.g. to forward
+    /// raw bytes alongside decoded events) can reconcile its own buffer to
+    /// exactly the same length so the two never drift apart.
+    pub fn buffered_len(&self) -> usize {
+        self.buf.len()
+    }
+
     pub fn parse_as_vec(&mut self, bytes: &[u8], maybe_more: bool) -> Vec<InputEvent> {
         let mut result = Vec::new();
         self.parse(bytes, |event| result.push(event), maybe_more);
@@ -2128,6 +2141,49 @@ mod test {
         assert_eq!(esc_bytes, b"\x1b");
         assert_eq!(mouse_bytes, b"\x1b[<35;62;16M");
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn paste_start_alone_is_consumed_silently_and_not_buffered() {
+        let mut p = InputParser::new();
+        let mut events: Vec<(InputEvent, usize)> = Vec::new();
+        p.parse_with_consumed(b"\x1b[200~", |ev, n| events.push((ev, n)), MAYBE_MORE);
+        assert!(
+            events.is_empty(),
+            "a lone paste-start marker must produce no events, got {:?}",
+            events
+        );
+        assert_eq!(
+            p.buffered_len(),
+            0,
+            "the paste-start bytes are consumed out of the parser buffer without any event reporting them"
+        );
+    }
+
+    #[test]
+    fn paste_start_with_partial_payload_buffers_only_the_payload() {
+        let mut p = InputParser::new();
+        let mut events: Vec<(InputEvent, usize)> = Vec::new();
+        p.parse_with_consumed(b"\x1b[200~hel", |ev, n| events.push((ev, n)), MAYBE_MORE);
+        assert!(events.is_empty(), "got {:?}", events);
+        assert_eq!(
+            p.buffered_len(),
+            3,
+            "only the pending paste payload remains buffered; the 6 marker bytes were consumed silently"
+        );
+    }
+
+    #[test]
+    fn parked_esc_before_partial_utf8_is_consumed_out_of_the_buffer() {
+        let mut p = InputParser::new();
+        let mut events: Vec<(InputEvent, usize)> = Vec::new();
+        p.parse_with_consumed(b"\x1b\xc3", |ev, n| events.push((ev, n)), MAYBE_MORE);
+        assert!(events.is_empty(), "got {:?}", events);
+        assert_eq!(
+            p.buffered_len(),
+            1,
+            "the parked ESC is held in parser state, not in the buffer; only the partial UTF-8 byte remains"
+        );
     }
 
     #[test]
@@ -3124,5 +3180,57 @@ mod test {
             panic!("wrong variant");
         };
         assert_eq!(&raw[..], bytes, "raw must be byte-identical to input");
+    }
+
+    #[test]
+    fn focus_reports_decode_as_focus_events() {
+        let mut p = InputParser::new();
+        assert_eq!(
+            p.parse_as_vec(b"\x1b[I", MAYBE_MORE),
+            vec![InputEvent::FocusGained],
+        );
+        assert_eq!(
+            p.parse_as_vec(b"\x1b[O", MAYBE_MORE),
+            vec![InputEvent::FocusLost],
+        );
+    }
+
+    #[test]
+    fn focus_report_split_across_reads_still_decodes_as_one_event() {
+        let mut p = InputParser::new();
+        assert_eq!(p.parse_as_vec(b"\x1b[", MAYBE_MORE), vec![]);
+        assert_eq!(
+            p.parse_as_vec(b"I", MAYBE_MORE),
+            vec![InputEvent::FocusGained],
+        );
+    }
+
+    #[test]
+    fn focus_reports_never_degrade_into_literal_characters() {
+        let mut p = InputParser::new();
+        let events = p.parse_as_vec(b"\x1b[O\x1b[I", MAYBE_MORE);
+        assert_eq!(
+            events,
+            vec![InputEvent::FocusLost, InputEvent::FocusGained],
+            "a focus report must not decode as Alt+[ plus a literal I/O keystroke"
+        );
+    }
+
+    #[test]
+    fn alt_bracket_is_still_recognized_for_other_following_bytes() {
+        let mut p = InputParser::new();
+        assert_eq!(
+            p.parse_as_vec(b"\x1b[x", MAYBE_MORE),
+            vec![
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('['),
+                    modifiers: Modifiers::ALT,
+                }),
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('x'),
+                    modifiers: Modifiers::NONE,
+                }),
+            ],
+        );
     }
 }

@@ -4,7 +4,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use zellij_server::panes::terminal_character::AnsiCode;
+use zellij_server::panes::kitty_graphics::KittyImageStore;
+pub use zellij_server::panes::terminal_character::AnsiCode;
 use zellij_server::panes::{LinkHandler, TerminalPane};
 use zellij_utils::data::{Palette, Style};
 use zellij_utils::pane_size::{Dimension, PaneGeom, Size, SizeInPixels};
@@ -52,6 +53,10 @@ impl ClientScreen {
         render_bytes(&bytes, size)
     }
 
+    pub fn raw_bytes(&self) -> Vec<u8> {
+        self.inner.received_bytes.lock().unwrap().bytes.clone()
+    }
+
     pub fn wait_until_raw_output(&self, what: &str, predicate: impl Fn(&[u8]) -> bool) -> Vec<u8> {
         let deadline = Instant::now() + crate::default_timeout();
         let mut received_bytes = self.inner.received_bytes.lock().unwrap();
@@ -61,9 +66,12 @@ impl ClientScreen {
             }
             let now = Instant::now();
             if now >= deadline {
+                let size = *self.size.lock().unwrap();
+                let grid_snapshot = render_bytes(&received_bytes.bytes, size);
                 panic!(
-                    "timed out waiting for: {}\n=== (received {} stdout bytes, generation {}) ===\n=== zellij log tail ({}) ===\n{}",
+                    "timed out waiting for: {}\nlast rendered grid:\n{}\n=== (received {} stdout bytes, generation {}) ===\n=== zellij log tail ({}) ===\n{}",
                     what,
+                    grid_snapshot.text,
                     received_bytes.bytes.len(),
                     received_bytes.generation,
                     crate::test_env::log_file_path().display(),
@@ -174,6 +182,7 @@ pub struct CellStyle {
     pub dim: bool,
     pub italic: bool,
     pub bold: bool,
+    pub foreground: Option<AnsiCode>,
 }
 
 #[derive(Clone, Debug)]
@@ -193,6 +202,9 @@ impl GridSnapshot {
             .and_then(|row| row.get(x))
             .copied()
             .unwrap_or_default()
+    }
+    pub fn cell_foreground(&self, x: usize, y: usize) -> Option<AnsiCode> {
+        self.cell_style(x, y).foreground
     }
     pub fn char_is_dim(&self, x: usize, y: usize) -> bool {
         self.cell_style(x, y).dim
@@ -298,6 +310,7 @@ fn render_bytes(bytes: &[u8], win_size: Size) -> GridSnapshot {
                 dim: matches!(character_style.dim, Some(AnsiCode::On)),
                 italic: matches!(character_style.italic, Some(AnsiCode::On)),
                 bold: matches!(character_style.bold, Some(AnsiCode::On)),
+                foreground: character_style.foreground,
             });
             let character_position = CursorPosition {
                 x: character_index,
@@ -363,6 +376,7 @@ fn build_terminal_pane(win_size: Size) -> TerminalPane {
         link_handler,
         character_cell_size,
         sixel_image_store,
+        Rc::new(RefCell::new(KittyImageStore::default())),
         terminal_emulator_colors,
         terminal_emulator_color_codes,
         initial_pane_title,

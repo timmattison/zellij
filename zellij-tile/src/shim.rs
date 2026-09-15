@@ -7,7 +7,6 @@ use std::{
 use zellij_utils::data::*;
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;
-use zellij_utils::pane_size::Size;
 pub use zellij_utils::plugin_api;
 use zellij_utils::plugin_api::event::ProtobufPaneScrollbackResponse;
 use zellij_utils::plugin_api::generated_api::api::plugin_command::{
@@ -503,7 +502,7 @@ pub fn open_terminal<P: AsRef<Path>>(path: P) -> Option<PaneId> {
 }
 
 /// Open a new terminal pane to the specified location on the host filesystem
-/// This variant is identical to open_terminal, excpet it opens it near the plugin regardless of
+/// This variant is identical to open_terminal, except it opens it near the plugin regardless of
 /// whether the user was focused on it or not
 pub fn open_terminal_near_plugin<P: AsRef<Path>>(path: P) -> Option<PaneId> {
     let file_to_open = FileToOpen::new(path.as_ref().to_path_buf());
@@ -536,7 +535,7 @@ pub fn open_terminal_floating<P: AsRef<Path>>(
 }
 
 /// Open a new floating terminal pane to the specified location on the host filesystem
-/// This variant is identical to open_terminal_floating, excpet it opens it near the plugin regardless of
+/// This variant is identical to open_terminal_floating, except it opens it near the plugin regardless of
 /// whether the user was focused on it or not
 pub fn open_terminal_floating_near_plugin<P: AsRef<Path>>(
     path: P,
@@ -1381,7 +1380,7 @@ pub fn undo_rename_tab() {
     unsafe { host_run_plugin_command() };
 }
 
-/// Compeltely quit Zellij for this and all other connected clients
+/// Completely quit Zellij for this and all other connected clients
 pub fn quit_zellij() {
     let plugin_command = PluginCommand::QuitZellij;
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
@@ -1650,7 +1649,7 @@ pub fn block_cli_pipe_input(pipe_name: &str) {
     unsafe { host_run_plugin_command() };
 }
 
-/// Send output to the output side of a pipe, ths does not affect the input side of same pipe
+/// Send output to the output side of a pipe, this does not affect the input side of same pipe
 pub fn cli_pipe_output(pipe_name: &str, output: &str) {
     let plugin_command = PluginCommand::CliPipeOutput(pipe_name.to_owned(), output.to_owned());
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
@@ -1723,27 +1722,6 @@ pub fn scan_host_folder<S: AsRef<Path>>(folder_to_scan: &S) {
 
 pub fn set_soft_keyboard(on: bool) {
     let plugin_command = PluginCommand::SetSoftKeyboard(on);
-    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
-    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
-    unsafe { host_run_plugin_command() };
-}
-
-pub fn set_tab_fit(tab_id: usize, fit: Option<(PaneId, Size)>) {
-    let plugin_command = PluginCommand::SetTabFit { tab_id, fit };
-    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
-    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
-    unsafe { host_run_plugin_command() };
-}
-
-pub fn exit_mobile_mode() {
-    let plugin_command = PluginCommand::ExitMobileMode;
-    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
-    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
-    unsafe { host_run_plugin_command() };
-}
-
-pub fn set_shadow_focus(pane_id: PaneId) {
-    let plugin_command = PluginCommand::SetShadowFocus(pane_id);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
     unsafe { host_run_plugin_command() };

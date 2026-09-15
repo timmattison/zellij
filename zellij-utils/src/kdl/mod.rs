@@ -2,7 +2,7 @@ mod kdl_layout_parser;
 use crate::data::{
     BareKey, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier, LayoutInfo,
     LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo, PaneManifest,
-    PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo, WebSharing,
+    PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo, ThemeHue, WebSharing,
     DEFAULT_STYLES,
 };
 use crate::envs::EnvironmentVariables;
@@ -12,7 +12,9 @@ use crate::input::keybinds::Keybinds;
 use crate::input::layout::{
     Layout, PercentOrFixed, PluginUserConfiguration, RunPlugin, RunPluginOrAlias, TabLayoutInfo,
 };
-use crate::input::options::{Clipboard, OnForceClose, Options, PaneFrameStyle};
+use crate::input::options::{
+    Clipboard, OnForceClose, Options, PaneFrameStyle, DEFAULT_WORD_SEPARATORS,
+};
 use crate::input::permission::{GrantedPermission, PermissionCache};
 use crate::input::plugins::PluginAliases;
 use crate::input::theme::{FrameConfig, Theme, Themes, UiConfig};
@@ -58,6 +60,10 @@ macro_rules! parse_kdl_action_arguments {
                 "ScrollDown" => Ok(Action::ScrollDown),
                 "ScrollToBottom" => Ok(Action::ScrollToBottom),
                 "ScrollToTop" => Ok(Action::ScrollToTop),
+                "ScrollToPreviousPrompt" => Ok(Action::ScrollToPreviousPrompt),
+                "ScrollToNextPrompt" => Ok(Action::ScrollToNextPrompt),
+                "SelectCommandAtScrollPosition" => Ok(Action::SelectCommandAtScrollPosition),
+                "CopyLastCommandOutput" => Ok(Action::CopyLastCommandOutput),
                 "PageScrollUp" => Ok(Action::PageScrollUp),
                 "PageScrollDown" => Ok(Action::PageScrollDown),
                 "HalfPageScrollUp" => Ok(Action::HalfPageScrollUp),
@@ -86,7 +92,6 @@ macro_rules! parse_kdl_action_arguments {
                 "Confirm" => Ok(Action::Confirm),
                 "Deny" => Ok(Action::Deny),
                 "ToggleMouseMode" => Ok(Action::ToggleMouseMode),
-                "ToggleMobileMode" => Ok(Action::ToggleMobileMode),
                 "PreviousSwapLayout" => Ok(Action::PreviousSwapLayout),
                 "NextSwapLayout" => Ok(Action::NextSwapLayout),
                 "Clear" => Ok(Action::ClearScreen),
@@ -743,6 +748,12 @@ impl Action {
             Action::ScrollDown => Some(KdlNode::new("ScrollDown")),
             Action::ScrollToBottom => Some(KdlNode::new("ScrollToBottom")),
             Action::ScrollToTop => Some(KdlNode::new("ScrollToTop")),
+            Action::ScrollToPreviousPrompt => Some(KdlNode::new("ScrollToPreviousPrompt")),
+            Action::ScrollToNextPrompt => Some(KdlNode::new("ScrollToNextPrompt")),
+            Action::SelectCommandAtScrollPosition => {
+                Some(KdlNode::new("SelectCommandAtScrollPosition"))
+            },
+            Action::CopyLastCommandOutput => Some(KdlNode::new("CopyLastCommandOutput")),
             Action::PageScrollUp => Some(KdlNode::new("PageScrollUp")),
             Action::PageScrollDown => Some(KdlNode::new("PageScrollDown")),
             Action::HalfPageScrollUp => Some(KdlNode::new("HalfPageScrollUp")),
@@ -1269,7 +1280,6 @@ impl Action {
                 Some(node)
             },
             Action::ToggleMouseMode => Some(KdlNode::new("ToggleMouseMode")),
-            Action::ToggleMobileMode => Some(KdlNode::new("ToggleMobileMode")),
             Action::PreviousSwapLayout => Some(KdlNode::new("PreviousSwapLayout")),
             Action::NextSwapLayout => Some(KdlNode::new("NextSwapLayout")),
             Action::BreakPane => Some(KdlNode::new("BreakPane")),
@@ -1572,6 +1582,18 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
             "ScrollToTop" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
+            "ScrollToPreviousPrompt" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "ScrollToNextPrompt" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "SelectCommandAtScrollPosition" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "CopyLastCommandOutput" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
             "PageScrollUp" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
@@ -1631,9 +1653,6 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "ToggleMouseMode" => {
-                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
-            },
-            "ToggleMobileMode" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "Detach" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
@@ -2764,6 +2783,16 @@ impl Options {
             .map(|(theme, _entry)| theme.to_string());
         let theme_light = kdl_property_first_arg_as_string_or_error!(kdl_options, "theme_light")
             .map(|(theme, _entry)| theme.to_string());
+        let explicit_theme_hue =
+            match kdl_property_first_arg_as_string_or_error!(kdl_options, "explicit_theme_hue") {
+                Some((string, entry)) => Some(ThemeHue::from_str(string).map_err(|_| {
+                    kdl_parsing_error!(
+                        format!("Invalid value for explicit_theme_hue: '{}'", string),
+                        entry
+                    )
+                })?),
+                None => None,
+            };
         let default_mode =
             match kdl_property_first_arg_as_string_or_error!(kdl_options, "default_mode") {
                 Some((string, entry)) => Some(InputMode::from_str(string).map_err(|_| {
@@ -2833,6 +2862,11 @@ impl Options {
             "support_kitty_keyboard_protocol"
         )
         .map(|(v, _)| v);
+        let support_kitty_graphics_protocol = kdl_property_first_arg_as_bool_or_error!(
+            kdl_options,
+            "support_kitty_graphics_protocol"
+        )
+        .map(|(v, _)| v);
         let web_server =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "web_server").map(|(v, _)| v);
         let web_sharing =
@@ -2862,8 +2896,14 @@ impl Options {
         let mouse_scroll_resize =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "mouse_scroll_resize")
                 .map(|(v, _)| v);
+        let scroll_mode_sync =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "scroll_mode_sync")
+                .map(|(v, _)| v);
         let mouse_hover_effects =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "mouse_hover_effects")
+                .map(|(v, _)| v);
+        let mouse_hover_tips =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "mouse_hover_tips")
                 .map(|(v, _)| v);
         let web_server_ip =
             match kdl_property_first_arg_as_string_or_error!(kdl_options, "web_server_ip") {
@@ -2913,39 +2953,12 @@ impl Options {
         let mouse_click_through =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "mouse_click_through")
                 .map(|(v, _)| v);
-        let mobile_layout =
-            match kdl_property_first_arg_as_string_or_error!(kdl_options, "mobile_layout") {
-                Some((value, entry)) => {
-                    use crate::input::options::MobileLayoutConfiguration;
-                    match value.parse::<MobileLayoutConfiguration>() {
-                        Ok(v) => Some(v),
-                        Err(e) => return Err(kdl_parsing_error!(e, entry)),
-                    }
-                },
-                None => None,
-            };
-        let mobile_threshold_cols =
-            match kdl_property_first_arg_as_i64_or_error!(kdl_options, "mobile_threshold_cols") {
-                Some((value, _)) if value >= 0 => Some(value as u16),
-                Some((value, entry)) => {
-                    return Err(kdl_parsing_error!(
-                        format!("mobile_threshold_cols must be >= 0, found '{}'", value),
-                        entry
-                    ));
-                },
-                None => None,
-            };
-        let mobile_threshold_rows =
-            match kdl_property_first_arg_as_i64_or_error!(kdl_options, "mobile_threshold_rows") {
-                Some((value, _)) if value >= 0 => Some(value as u16),
-                Some((value, entry)) => {
-                    return Err(kdl_parsing_error!(
-                        format!("mobile_threshold_rows must be >= 0, found '{}'", value),
-                        entry
-                    ));
-                },
-                None => None,
-            };
+        let osc133_command_selection =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "osc133_command_selection")
+                .map(|(v, _)| v);
+        let word_separators =
+            kdl_property_first_arg_as_string_or_error!(kdl_options, "word_separators")
+                .map(|(separators, _entry)| separators.to_string());
         let nested_session_handling = match kdl_property_first_arg_as_string_or_error!(
             kdl_options,
             "nested_session_handling"
@@ -2959,12 +2972,31 @@ impl Options {
             },
             None => None,
         };
+        let host_notification_protocol = match kdl_property_first_arg_as_string_or_error!(
+            kdl_options,
+            "host_notification_protocol"
+        ) {
+            Some((value, entry)) => {
+                use crate::input::options::HostNotificationProtocol;
+                match value.parse::<HostNotificationProtocol>() {
+                    Ok(v) => Some(v),
+                    Err(e) => return Err(kdl_parsing_error!(e, entry)),
+                }
+            },
+            None => None,
+        };
+        let dangerously_enable_paste_buffer_read = kdl_property_first_arg_as_bool_or_error!(
+            kdl_options,
+            "dangerously_enable_paste_buffer_read"
+        )
+        .map(|(v, _)| v);
 
         Ok(Options {
             simplified_ui,
             theme,
             theme_dark,
             theme_light,
+            explicit_theme_hue,
             default_mode,
             default_shell,
             default_cwd,
@@ -2992,6 +3024,7 @@ impl Options {
             serialization_interval,
             disable_session_metadata,
             support_kitty_keyboard_protocol,
+            support_kitty_graphics_protocol,
             web_server,
             web_sharing,
             stacked_resize,
@@ -3000,10 +3033,15 @@ impl Options {
             show_release_notes,
             advanced_mouse_actions,
             mouse_scroll_resize,
+            scroll_mode_sync,
             mouse_hover_effects,
+            mouse_hover_tips,
             visual_bell,
             focus_follows_mouse,
             mouse_click_through,
+            osc133_command_selection,
+            word_separators,
+            host_notification_protocol,
             web_server_ip,
             web_server_port,
             web_server_cert,
@@ -3011,10 +3049,8 @@ impl Options {
             enforce_https_for_localhost,
             post_command_discovery_hook,
             client_async_worker_tasks,
-            mobile_layout,
-            mobile_threshold_cols,
-            mobile_threshold_rows,
             nested_session_handling,
+            dangerously_enable_paste_buffer_read,
         })
     }
     pub fn from_string(stringified_keybindings: &String) -> Result<Self, ConfigError> {
@@ -3159,6 +3195,35 @@ impl Options {
             Some(node)
         } else if add_comments {
             let mut node = create_node("solarized-light");
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn explicit_theme_hue_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            " ",
+            "// Pin the session to a dark or light appearance, ignoring what the",
+            "// host terminal reports. When unset, the host terminal decides.",
+            "// Options: dark, light",
+            "// ",
+        );
+
+        let create_node = |hue: &ThemeHue| -> KdlNode {
+            let mut node = KdlNode::new("explicit_theme_hue");
+            node.push(format!("{}", hue));
+            node
+        };
+        if let Some(explicit_theme_hue) = &self.explicit_theme_hue {
+            let mut node = create_node(explicit_theme_hue);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(&ThemeHue::Dark);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {
@@ -3938,6 +4003,34 @@ impl Options {
             None
         }
     }
+    fn support_kitty_graphics_protocol_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!("{}\n{}\n{}\n{}\n{}",
+            " ",
+            "// Enable or disable support for the Kitty Graphics Protocol, used to display images (the host terminal must also support it)",
+            "// (Requires restart)",
+            "// Default: true (if the host terminal supports it)",
+            "// ",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("support_kitty_graphics_protocol");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(support_kitty_graphics_protocol) = self.support_kitty_graphics_protocol {
+            let mut node = create_node(support_kitty_graphics_protocol);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     fn web_server_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -4259,6 +4352,60 @@ impl Options {
             None
         }
     }
+    fn scroll_mode_sync_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}",
+            " ",
+            "// Whether scrolling a pane implicitly enters and exits Scroll mode",
+            "// default is true",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("scroll_mode_sync");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(scroll_mode_sync) = self.scroll_mode_sync {
+            let mut node = create_node(scroll_mode_sync);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn mouse_hover_tips_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}",
+            " ",
+            "// Whether to show mouse hover help-text tips (resize help and group shortcuts)",
+            "// default is true",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("mouse_hover_tips");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(mouse_hover_tips) = self.mouse_hover_tips {
+            let mut node = create_node(mouse_hover_tips);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     fn mouse_hover_effects_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}",
@@ -4365,6 +4512,62 @@ impl Options {
             None
         }
     }
+    fn osc133_command_selection_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}",
+            " ",
+            "// Whether triple-clicking inside command output marked by the shell (OSC 133) selects",
+            "// the command and its output instead of the logical line",
+            "// default is true",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("osc133_command_selection");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(osc133_command_selection) = self.osc133_command_selection {
+            let mut node = create_node(osc133_command_selection);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn word_separators_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}",
+            " ",
+            "// Characters that terminate a word when double-clicking to select it",
+            "// whitespace is always a separator and need not be listed here",
+            "// default is \"[]{}<>()\"",
+        );
+
+        let create_node = |node_value: &str| -> KdlNode {
+            let mut node = KdlNode::new("word_separators");
+            node.push(node_value.to_owned());
+            node
+        };
+        if let Some(word_separators) = &self.word_separators {
+            let mut node = create_node(word_separators);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(DEFAULT_WORD_SEPARATORS);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     fn web_server_ip_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}",
@@ -4451,94 +4654,6 @@ impl Options {
             None
         }
     }
-    fn mobile_layout_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        use crate::input::options::MobileLayoutConfiguration;
-        let comment_text = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            " ",
-            "// When attached clients land in the mobile UI plugin.",
-            "// Options:",
-            "//   - \"web\" (Default — web clients only, gated on mobile_threshold_cols/rows)",
-            "//   - \"always\" (any client, gated on mobile_threshold_cols/rows)",
-            "//   - \"never\"",
-            "// ",
-        );
-        let create_node = |value: MobileLayoutConfiguration| -> KdlNode {
-            let mut node = KdlNode::new("mobile_layout");
-            let s = match value {
-                MobileLayoutConfiguration::Web => "web",
-                MobileLayoutConfiguration::Always => "always",
-                MobileLayoutConfiguration::Never => "never",
-            };
-            node.push(KdlValue::String(s.to_string()));
-            node
-        };
-        if let Some(value) = self.mobile_layout {
-            let mut node = create_node(value);
-            if add_comments {
-                node.set_leading(format!("{}\n", comment_text));
-            }
-            Some(node)
-        } else if add_comments {
-            let mut node = create_node(MobileLayoutConfiguration::Web);
-            node.set_leading(format!("{}\n// ", comment_text));
-            Some(node)
-        } else {
-            None
-        }
-    }
-    fn mobile_threshold_cols_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!(
-            "{}\n{}\n{}",
-            " ",
-            "// Column breakpoint for mobile_layout (web/always). 0 = always match.",
-            "// Default: 60",
-        );
-        let create_node = |value: u16| -> KdlNode {
-            let mut node = KdlNode::new("mobile_threshold_cols");
-            node.push(KdlValue::Base10(value as i64));
-            node
-        };
-        if let Some(value) = self.mobile_threshold_cols {
-            let mut node = create_node(value);
-            if add_comments {
-                node.set_leading(format!("{}\n", comment_text));
-            }
-            Some(node)
-        } else if add_comments {
-            let mut node = create_node(60);
-            node.set_leading(format!("{}\n// ", comment_text));
-            Some(node)
-        } else {
-            None
-        }
-    }
-    fn mobile_threshold_rows_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!(
-            "{}\n{}\n{}",
-            " ",
-            "// Row breakpoint for mobile_layout (web/always). 0 = always match.",
-            "// Default: 30",
-        );
-        let create_node = |value: u16| -> KdlNode {
-            let mut node = KdlNode::new("mobile_threshold_rows");
-            node.push(KdlValue::Base10(value as i64));
-            node
-        };
-        if let Some(value) = self.mobile_threshold_rows {
-            let mut node = create_node(value);
-            if add_comments {
-                node.set_leading(format!("{}\n", comment_text));
-            }
-            Some(node)
-        } else if add_comments {
-            let mut node = create_node(30);
-            node.set_leading(format!("{}\n// ", comment_text));
-            Some(node)
-        } else {
-            None
-        }
-    }
     fn nested_session_handling_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         use crate::input::options::NestedSessionHandling;
         let comment_text = format!(
@@ -4571,6 +4686,69 @@ impl Options {
             Some(node)
         } else if add_comments {
             let mut node = create_node(NestedSessionHandling::Ask);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn host_notification_protocol_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        use crate::input::options::HostNotificationProtocol;
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            " ",
+            "// Which escape sequence desktop notifications coming from panes are",
+            "// forwarded to the host terminal with.",
+            "// Options:",
+            "//   - \"auto\" (Default — detect from the host terminal environment)",
+            "//   - \"osc9\" (the legacy iTerm2 protocol, understood by most terminals)",
+            "//   - \"osc99\" (kitty's notification protocol)",
+            "//   - \"bell\" (ring the terminal bell instead)",
+            "//   - \"off\" (do not forward notifications to the host terminal)",
+            "// ",
+        );
+        let create_node = |value: HostNotificationProtocol| -> KdlNode {
+            let mut node = KdlNode::new("host_notification_protocol");
+            node.push(KdlValue::String(value.as_str().to_string()));
+            node
+        };
+        if let Some(value) = self.host_notification_protocol {
+            let mut node = create_node(value);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(HostNotificationProtocol::Auto);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn dangerously_enable_paste_buffer_read_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            " ",
+            "// Whether to let programs running inside panes read the paste buffer",
+            "// (clipboard) with the OSC 52 escape sequence. When enabled, any program",
+            "// in any pane - including one running on a remote machine over SSH - can",
+            "// read the clipboard without the user being asked.",
+            "// Default: false",
+        );
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("dangerously_enable_paste_buffer_read");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(value) = self.dangerously_enable_paste_buffer_read {
+            let mut node = create_node(value);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {
@@ -4619,6 +4797,9 @@ impl Options {
         }
         if let Some(theme_light_node) = self.theme_light_to_kdl(add_comments) {
             nodes.push(theme_light_node);
+        }
+        if let Some(explicit_theme_hue_node) = self.explicit_theme_hue_to_kdl(add_comments) {
+            nodes.push(explicit_theme_hue_node);
         }
         if let Some(default_mode) = self.default_mode_to_kdl(add_comments) {
             nodes.push(default_mode);
@@ -4702,6 +4883,11 @@ impl Options {
         {
             nodes.push(support_kitty_keyboard_protocol);
         }
+        if let Some(support_kitty_graphics_protocol) =
+            self.support_kitty_graphics_protocol_to_kdl(add_comments)
+        {
+            nodes.push(support_kitty_graphics_protocol);
+        }
         if let Some(web_server) = self.web_server_to_kdl(add_comments) {
             nodes.push(web_server);
         }
@@ -4737,8 +4923,14 @@ impl Options {
         if let Some(mouse_scroll_resize) = self.mouse_scroll_resize_to_kdl(add_comments) {
             nodes.push(mouse_scroll_resize);
         }
+        if let Some(scroll_mode_sync) = self.scroll_mode_sync_to_kdl(add_comments) {
+            nodes.push(scroll_mode_sync);
+        }
         if let Some(mouse_hover_effects) = self.mouse_hover_effects_to_kdl(add_comments) {
             nodes.push(mouse_hover_effects);
+        }
+        if let Some(mouse_hover_tips) = self.mouse_hover_tips_to_kdl(add_comments) {
+            nodes.push(mouse_hover_tips);
         }
         if let Some(visual_bell) = self.visual_bell_to_kdl(add_comments) {
             nodes.push(visual_bell);
@@ -4748,6 +4940,12 @@ impl Options {
         }
         if let Some(mouse_click_through) = self.mouse_click_through_to_kdl(add_comments) {
             nodes.push(mouse_click_through);
+        }
+        if let Some(osc133_command_selection) = self.osc133_command_selection_to_kdl(add_comments) {
+            nodes.push(osc133_command_selection);
+        }
+        if let Some(word_separators) = self.word_separators_to_kdl(add_comments) {
+            nodes.push(word_separators);
         }
         if let Some(web_server_ip) = self.web_server_ip_to_kdl(add_comments) {
             nodes.push(web_server_ip);
@@ -4764,17 +4962,18 @@ impl Options {
         {
             nodes.push(client_async_worker_tasks);
         }
-        if let Some(mobile_layout) = self.mobile_layout_to_kdl(add_comments) {
-            nodes.push(mobile_layout);
-        }
-        if let Some(mobile_threshold_cols) = self.mobile_threshold_cols_to_kdl(add_comments) {
-            nodes.push(mobile_threshold_cols);
-        }
-        if let Some(mobile_threshold_rows) = self.mobile_threshold_rows_to_kdl(add_comments) {
-            nodes.push(mobile_threshold_rows);
+        if let Some(dangerously_enable_paste_buffer_read) =
+            self.dangerously_enable_paste_buffer_read_to_kdl(add_comments)
+        {
+            nodes.push(dangerously_enable_paste_buffer_read);
         }
         if let Some(nested_session_handling) = self.nested_session_handling_to_kdl(add_comments) {
             nodes.push(nested_session_handling);
+        }
+        if let Some(host_notification_protocol) =
+            self.host_notification_protocol_to_kdl(add_comments)
+        {
+            nodes.push(host_notification_protocol);
         }
         nodes
     }
@@ -7512,6 +7711,114 @@ fn env_vars_to_string_with_no_env_vars() {
 }
 
 #[test]
+fn selection_options_from_kdl() {
+    let fake_config = r##"
+        osc133_command_selection false
+        word_separators "[]{}<>():,"
+    "##;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    let deserialized = Options::from_kdl(&document).unwrap();
+    assert_eq!(deserialized.osc133_command_selection, Some(false));
+    assert_eq!(
+        deserialized.word_separators,
+        Some("[]{}<>():,".to_owned()),
+        "word separators are parsed verbatim"
+    );
+}
+
+#[test]
+fn selection_options_default_to_none_when_unspecified() {
+    let document: KdlDocument = "".parse().unwrap();
+    let deserialized = Options::from_kdl(&document).unwrap();
+    assert_eq!(deserialized.osc133_command_selection, None);
+    assert_eq!(deserialized.word_separators, None);
+}
+
+#[test]
+fn scroll_mode_sync_from_kdl() {
+    let fake_config = r##"
+        scroll_mode_sync false
+    "##;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    let deserialized = Options::from_kdl(&document).unwrap();
+    assert_eq!(deserialized.scroll_mode_sync, Some(false));
+
+    let empty_document: KdlDocument = "".parse().unwrap();
+    let deserialized_empty = Options::from_kdl(&empty_document).unwrap();
+    assert_eq!(
+        deserialized_empty.scroll_mode_sync, None,
+        "an unspecified scroll_mode_sync stays None so the default applies"
+    );
+}
+
+#[test]
+fn scroll_mode_sync_round_trips_through_kdl() {
+    let fake_config = r##"
+        scroll_mode_sync false
+    "##;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    let deserialized = Options::from_kdl(&document).unwrap();
+    let mut serialized = Options::to_kdl(&deserialized, false);
+    let mut fake_document = KdlDocument::new();
+    fake_document.nodes_mut().append(&mut serialized);
+    let deserialized_from_serialized =
+        Options::from_kdl(&fake_document.to_string().parse::<KdlDocument>().unwrap()).unwrap();
+    assert_eq!(
+        deserialized_from_serialized.scroll_mode_sync,
+        Some(false),
+        "scroll_mode_sync survives a serialize/parse round trip"
+    );
+}
+
+#[test]
+fn explicit_theme_hue_from_kdl() {
+    let fake_config = r##"
+        explicit_theme_hue "light"
+    "##;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    let deserialized = Options::from_kdl(&document).unwrap();
+    assert_eq!(deserialized.explicit_theme_hue, Some(ThemeHue::Light));
+
+    let empty_document: KdlDocument = "".parse().unwrap();
+    let deserialized_empty = Options::from_kdl(&empty_document).unwrap();
+    assert_eq!(
+        deserialized_empty.explicit_theme_hue, None,
+        "an unspecified explicit_theme_hue leaves the host terminal in charge"
+    );
+}
+
+#[test]
+fn explicit_theme_hue_rejects_unknown_values() {
+    let fake_config = r##"
+        explicit_theme_hue "sepia"
+    "##;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    assert!(
+        Options::from_kdl(&document).is_err(),
+        "only 'dark' and 'light' are accepted"
+    );
+}
+
+#[test]
+fn explicit_theme_hue_round_trips_through_kdl() {
+    let fake_config = r##"
+        explicit_theme_hue "dark"
+    "##;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    let deserialized = Options::from_kdl(&document).unwrap();
+    let mut serialized = Options::to_kdl(&deserialized, false);
+    let mut fake_document = KdlDocument::new();
+    fake_document.nodes_mut().append(&mut serialized);
+    let deserialized_from_serialized =
+        Options::from_kdl(&fake_document.to_string().parse::<KdlDocument>().unwrap()).unwrap();
+    assert_eq!(
+        deserialized_from_serialized.explicit_theme_hue,
+        Some(ThemeHue::Dark),
+        "explicit_theme_hue survives a serialize/parse round trip"
+    );
+}
+
+#[test]
 fn config_options_to_string() {
     let fake_config = r##"
         simplified_ui true
@@ -7543,9 +7850,6 @@ fn config_options_to_string() {
         support_kitty_keyboard_protocol false
         web_server true
         web_sharing "disabled"
-        mobile_layout "always"
-        mobile_threshold_cols 72
-        mobile_threshold_rows 0
     "##;
     let document: KdlDocument = fake_config.parse().unwrap();
     let deserialized = Options::from_kdl(&document).unwrap();
@@ -7593,9 +7897,6 @@ fn config_options_to_string_with_comments() {
         support_kitty_keyboard_protocol false
         web_server true
         web_sharing "disabled"
-        mobile_layout "always"
-        mobile_threshold_cols 72
-        mobile_threshold_rows 0
     "##;
     let document: KdlDocument = fake_config.parse().unwrap();
     let deserialized = Options::from_kdl(&document).unwrap();
@@ -7630,37 +7931,6 @@ fn config_options_to_string_without_options() {
 }
 
 #[test]
-fn mobile_layout_kdl_round_trip_for_every_variant() {
-    use crate::input::options::MobileLayoutConfiguration;
-    let cases = [
-        ("web", MobileLayoutConfiguration::Web, (60, 30)),
-        ("always", MobileLayoutConfiguration::Always, (0, 0)),
-        ("never", MobileLayoutConfiguration::Never, (40, 0)),
-    ];
-    for (value, expected, (cols, rows)) in cases {
-        let fake_config = format!(
-            r##"
-                mobile_layout "{value}"
-                mobile_threshold_cols {cols}
-                mobile_threshold_rows {rows}
-            "##
-        );
-        let document: KdlDocument = fake_config.parse().unwrap();
-        let parsed = Options::from_kdl(&document).unwrap();
-        assert_eq!(parsed.mobile_layout, Some(expected), "case: {value}");
-        assert_eq!(parsed.mobile_threshold_cols, Some(cols), "case: {value}");
-        assert_eq!(parsed.mobile_threshold_rows, Some(rows), "case: {value}");
-
-        let mut serialized = Options::to_kdl(&parsed, false);
-        let mut fake_document = KdlDocument::new();
-        fake_document.nodes_mut().append(&mut serialized);
-        let reparsed =
-            Options::from_kdl(&fake_document.to_string().parse::<KdlDocument>().unwrap()).unwrap();
-        assert_eq!(parsed, reparsed, "round-trip mismatch for {value}");
-    }
-}
-
-#[test]
 fn nested_session_handling_kdl_round_trip_for_every_variant() {
     use crate::input::options::NestedSessionHandling;
     let cases = [
@@ -7690,6 +7960,59 @@ fn nested_session_handling_kdl_round_trip_for_every_variant() {
             Options::from_kdl(&fake_document.to_string().parse::<KdlDocument>().unwrap()).unwrap();
         assert_eq!(parsed, reparsed, "round-trip mismatch for {value}");
     }
+}
+
+#[test]
+fn host_notification_protocol_kdl_round_trip_for_every_variant() {
+    use crate::input::options::HostNotificationProtocol;
+    let cases = [
+        ("auto", HostNotificationProtocol::Auto),
+        ("osc9", HostNotificationProtocol::Osc9),
+        ("osc99", HostNotificationProtocol::Osc99),
+        ("bell", HostNotificationProtocol::Bell),
+        ("off", HostNotificationProtocol::Off),
+    ];
+    for (value, expected) in cases {
+        let fake_config = format!(
+            r##"
+                host_notification_protocol "{value}"
+            "##
+        );
+        let document: KdlDocument = fake_config.parse().unwrap();
+        let parsed = Options::from_kdl(&document).unwrap();
+        assert_eq!(
+            parsed.host_notification_protocol,
+            Some(expected),
+            "case: {value}"
+        );
+
+        let mut serialized = Options::to_kdl(&parsed, false);
+        let mut fake_document = KdlDocument::new();
+        fake_document.nodes_mut().append(&mut serialized);
+        let reparsed =
+            Options::from_kdl(&fake_document.to_string().parse::<KdlDocument>().unwrap()).unwrap();
+        assert_eq!(parsed, reparsed, "round-trip mismatch for {value}");
+    }
+}
+
+#[test]
+fn an_unknown_host_notification_protocol_is_a_config_error() {
+    let fake_config = r##"
+        host_notification_protocol "carrier-pigeon"
+    "##;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    assert!(Options::from_kdl(&document).is_err());
+}
+
+#[test]
+fn an_unset_host_notification_protocol_parses_as_none() {
+    let document: KdlDocument = r##"
+        simplified_ui true
+    "##
+    .parse()
+    .unwrap();
+    let parsed = Options::from_kdl(&document).unwrap();
+    assert_eq!(parsed.host_notification_protocol, None);
 }
 
 #[test]
